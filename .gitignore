@@ -1,8 +1,49 @@
-/__pycache__
-.Rproj.user
+############################
+# Python
+############################
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv
+venv/
+ENV/
 
+############################
+# Jupyter
+############################
+.ipynb_checkpoints/
+
+############################
 # R / RStudio
+############################
 .Rproj.user/
 .Rhistory
 .RData
-R/MICE.Rproj
+.Ruserdata
+*.Rproj
+
+############################
+# OS / Editor noise
+############################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+
+# Logs / temporary outputs
+############################
+*.log
+*.tmp
+*.bak
+*.swp
+
+############################
+# Caches
+############################
+.cache/
+.mypy_cache/
+.pytest_cache/
