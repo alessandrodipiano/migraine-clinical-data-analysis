@@ -1,5 +1,7 @@
 library(mice)
-
+library(dplyr)
+library(zoo)
+library(tidyr)
 library(miceadds)   
 exists("mice.impute.2l.pmm")
 
@@ -66,41 +68,39 @@ plot(imp_long)
 
 
 
+# One completed dataset for quick descriptive comparison
+df_long_imp1 <- complete(imp_long, 1)
 
 
-library(dplyr)
-library(tidyr)
-
+## -------------------------
 df_locf <- df_long %>%
   arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  fill(MMDs, DOSE, GGFAR, HADSA, HADSD, HIT6, INT, MIDAS, .direction = "down") %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  fill(all_of(cont_vars), .direction = "down") %>%
   ungroup()
-
-
 
 df_nocb <- df_long %>%
   arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  fill(MMDs, DOSE, GGFAR, HADSA, HADSD, HIT6, INT, MIDAS, .direction = "up") %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  fill(all_of(cont_vars), .direction = "up") %>%
   ungroup()
 
-install.packages('zoo')
-
-library(zoo)
+# Interpolate only continuous-like variables where it makes sense
+interp_vars <- intersect(c("MMDs","HIT6","MIDAS"), names(df_long))
 
 df_interp <- df_long %>%
   arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  mutate(
-    MMDs = na.approx(MMDs, x = MONTH, na.rm = FALSE),
-    HIT6 = na.approx(HIT6, x = MONTH, na.rm = FALSE),
-    MIDAS = na.approx(MIDAS, x = MONTH, na.rm = FALSE)
-  ) %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  mutate(across(
+    all_of(interp_vars),
+    ~ zoo::na.approx(.x, x = MONTH, na.rm = FALSE)
+  )) %>%
   ungroup()
 
-df_long_imp1 <- complete(imp_long, 1)
-compare <- function(var) {
+## -------------------------
+## 3) Quick distribution comparison (one variable)
+## -------------------------
+compare_var <- function(var) {
   rbind(
     original = summary(df_long[[var]]),
     locf     = summary(df_locf[[var]]),
@@ -109,80 +109,172 @@ compare <- function(var) {
     mice     = summary(df_long_imp1[[var]])
   )
 }
-compare("MMDs")
 
+compare_var("MMDs")
 
-# 1. Select only rows where MMDs is OBSERVED (the "Ground Truth" set)
-truth_set <- df_long[!is.na(df_long$MMDs), ]
-
-# 2. Artificially mask (delete) 20% of these known values
-set.seed(42)
-n_mask <- floor(0.2 * nrow(truth_set))
-mask_indices <- sample(1:nrow(truth_set), n_mask)
-
-test_data <- truth_set
-test_data$MMDs[mask_indices] <- NA  # Create artificial NAs
-
-# --- METHOD A: MICE (PMM) ---
-# We use a simplified run for speed in this test
-imp_test <- mice(test_data, method="pmm", m=1, maxit=5, printFlag=FALSE)
-mice_filled <- complete(imp_test)$MMDs[mask_indices]
-
-# --- METHOD B: LOCF ---
-# Note: Requires sorting by Subject/Time
-locf_filled <- test_data %>%
-  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  fill(MMDs, .direction = "down") %>%
-  ungroup() %>%
-  slice(mask_indices) %>%
-  pull(MMDs)
-
-# --- METHOD C: Linear Interpolation ---
-interp_filled <- test_data %>%
-  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  mutate(MMDs = na.approx(MMDs, x=MONTH, na.rm=FALSE)) %>%
-  ungroup() %>%
-  slice(mask_indices) %>%
-  pull(MMDs)
-
-# --- EVALUATION (RMSE) ---
+## -------------------------
+## 4) Masking-based RMSE benchmark (properly aligned)
+## -------------------------
 calc_rmse <- function(true, imputed) {
   sqrt(mean((true - imputed)^2, na.rm = TRUE))
 }
 
+# Build truth set with a stable row_id
+truth_set <- df_long %>%
+  filter(!is.na(MMDs)) %>%
+  mutate(row_id = row_number())
 
-# --- METHOD D: NOCB (Next Observation Carried Backward) ---
-# We use .direction = "up" to pull future values backward
-nocb_filled <- test_data %>%
-  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID) %>%
-  fill(MMDs, .direction = "up") %>% # The crucial difference
-  ungroup() %>%
-  slice(mask_indices) %>%
+set.seed(42)
+n_mask  <- floor(0.2 * nrow(truth_set))
+mask_ids <- sample(truth_set$row_id, n_mask)
+
+test_data <- truth_set %>%
+  mutate(MMDs_masked = ifelse(row_id %in% mask_ids, NA, MMDs))
+
+true_vals <- truth_set %>%
+  filter(row_id %in% mask_ids) %>%
   pull(MMDs)
 
-# Calculate RMSE for NOCB
-rmse_nocb <- calc_rmse(truth_set$MMDs[mask_indices], nocb_filled)
+## ---- LOCF (within SUBJECT_ID, CYCLE)
+locf_filled <- test_data %>%
+  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  mutate(MMDs_f = zoo::na.locf(MMDs_masked, na.rm = FALSE)) %>%
+  ungroup() %>%
+  filter(row_id %in% mask_ids) %>%
+  pull(MMDs_f)
 
+## ---- NOCB (within SUBJECT_ID, CYCLE)
+nocb_filled <- test_data %>%
+  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  mutate(MMDs_f = zoo::na.locf(MMDs_masked, fromLast = TRUE, na.rm = FALSE)) %>%
+  ungroup() %>%
+  filter(row_id %in% mask_ids) %>%
+  pull(MMDs_f)
 
+## ---- Interpolation (within SUBJECT_ID, CYCLE)
+interp_filled <- test_data %>%
+  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
+  group_by(SUBJECT_ID, CYCLE) %>%
+  mutate(MMDs_f = zoo::na.approx(MMDs_masked, x = MONTH, na.rm = FALSE)) %>%
+  ungroup() %>%
+  filter(row_id %in% mask_ids) %>%
+  pull(MMDs_f)
 
+## ---- MICE benchmark (multilevel, consistent with longitudinal structure)
+mice_test_df <- test_data %>%
+  transmute(SUBJECT_ID, CYCLE, MONTH, MMDs = MMDs_masked)
+
+ini2  <- mice(mice_test_df, maxit = 0, printFlag = FALSE)
+meth2 <- ini2$method
+pred2 <- ini2$predictorMatrix
+
+meth2["MMDs"] <- "2l.pmm"
+meth2[c("SUBJECT_ID","CYCLE","MONTH")] <- ""
+
+pred2[,] <- 0
+pred2["MMDs", "SUBJECT_ID"] <- -2
+pred2["MMDs", c("CYCLE","MONTH")] <- 1
+
+set.seed(123)
+imp_test <- mice(
+  mice_test_df,
+  method = meth2,
+  predictorMatrix = pred2,
+  m = 1, maxit = 10,
+  printFlag = FALSE
+)
+
+mice_completed <- complete(imp_test, 1)
+
+# Reattach row_id in original row order (mice keeps row order)
+mice_filled <- mice_completed %>%
+  mutate(row_id = test_data$row_id) %>%
+  filter(row_id %in% mask_ids) %>%
+  pull(MMDs)
+
+## ---- RMSE summary table
 results <- data.frame(
-  Method = c("MICE", "LOCF", "Interpolation"),
+  Method = c("MICE_2l_pmm", "LOCF", "NOCB", "Interpolation"),
   RMSE = c(
-    calc_rmse(truth_set$MMDs[mask_indices], mice_filled),
-    calc_rmse(truth_set$MMDs[mask_indices], locf_filled),
-    calc_rmse(truth_set$MMDs[mask_indices], interp_filled)
+    calc_rmse(true_vals, mice_filled),
+    calc_rmse(true_vals, locf_filled),
+    calc_rmse(true_vals, nocb_filled),
+    calc_rmse(true_vals, interp_filled)
   )
 )
-# Update the results table
-results <- rbind(results, data.frame(Method = "NOCB", RMSE = rmse_nocb))
-
 
 print(results)
 
+library(mice)
+library(dplyr)
 
+m_imp <- 20
 
+# Build MICE test data WITH row_id included
+mice_test_df <- test_data %>%
+  transmute(
+    row_id,                  # keep it!
+    SUBJECT_ID,
+    CYCLE,
+    MONTH,
+    MMDs = MMDs_masked
+  )
 
+ini2  <- mice(mice_test_df, maxit = 0, printFlag = FALSE)
+meth2 <- ini2$method
+pred2 <- ini2$predictorMatrix
 
+# Impute only MMDs
+meth2["MMDs"] <- "2l.pmm"
+meth2[c("row_id","SUBJECT_ID","CYCLE","MONTH")] <- ""
+
+# Predictor matrix
+pred2[,] <- 0
+pred2["MMDs", "SUBJECT_ID"] <- -2
+pred2["MMDs", c("CYCLE","MONTH")] <- 1
+
+# Ensure row_id is not used as a predictor (optional but clean)
+pred2["MMDs", "row_id"] <- 0
+
+set.seed(123)
+imp_test <- mice(
+  mice_test_df,
+  method = meth2,
+  predictorMatrix = pred2,
+  m = m_imp,
+  maxit = 10,
+  printFlag = FALSE
+)
+
+calc_rmse <- function(true, imputed) sqrt(mean((true - imputed)^2, na.rm = TRUE))
+
+# RMSE per imputation
+rmse_mice_each <- sapply(seq_len(m_imp), function(j) {
+  comp_j <- complete(imp_test, j)
+  
+  filled_j <- comp_j %>%
+    filter(row_id %in% mask_ids) %>%
+    pull(MMDs)
+  
+  calc_rmse(true_vals, filled_j)
+})
+
+rmse_mice_mean <- mean(rmse_mice_each)
+rmse_mice_sd   <- sd(rmse_mice_each)
+
+# Pooled (posterior-mean) RMSE
+filled_matrix <- sapply(seq_len(m_imp), function(j) {
+  complete(imp_test, j) %>%
+    filter(row_id %in% mask_ids) %>%
+    pull(MMDs)
+})
+
+mice_pooled_mean <- rowMeans(filled_matrix, na.rm = TRUE)
+rmse_mice_pooled <- calc_rmse(true_vals, mice_pooled_mean)
+
+cat("MICE RMSE across imputations:\n")
+cat("  mean =", rmse_mice_mean, "\n")
+cat("  sd   =", rmse_mice_sd, "\n\n")
+cat("MICE pooled-mean RMSE =", rmse_mice_pooled, "\n")

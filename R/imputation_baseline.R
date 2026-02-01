@@ -51,32 +51,35 @@ multi_vars <- intersect(multi_vars, all_cols)
 
 #-----------------------------------------
 
-# Initialize defaults
+
+#initialization
+#-----------------------
 ini  <- mice(df_baseline_clean, maxit = 0, printFlag = FALSE)
 meth <- ini$method
 pred <- ini$predictorMatrix
 
-# Set methods by type
+
 meth[cont_vars]  <- "pmm"
 meth[bin_vars]   <- "logreg"
 meth[multi_vars] <- "polyreg"
 
-# Never impute IDs
+
 if ("SUBJECT_ID" %in% names(meth)) meth["SUBJECT_ID"] <- ""
 if ("SUBJECT_ID" %in% colnames(pred)) pred[, "SUBJECT_ID"] <- 0
 if ("SUBJECT_ID" %in% rownames(pred)) pred["SUBJECT_ID", ] <- 0
 
 
 
-# Upstream vars: enforce methods (in case defaults differ)
 if ("AGE_OF_ONSET" %in% upstream_vars)          meth["AGE_OF_ONSET"] <- "pmm"
 if ("AGE_W_CHRONICMIGRAINE" %in% upstream_vars) meth["AGE_W_CHRONICMIGRAINE"] <- "pmm"
-if ("FAMILIARITY" %in% upstream_vars)           meth["FAMILIARITY"] <- "logreg"  # change to polyreg if >2 levels
+if ("FAMILIARITY" %in% upstream_vars)           meth["FAMILIARITY"] <- "logreg" 
 
-# True anchors not imputed
+
 meth[true_anchor] <- ""
 
-# Build predictor matrix with causal direction
+#PRED
+#-------------------------------------------
+
 pred[,] <- 0
 
 # Upstream predicted by true anchors
@@ -96,7 +99,7 @@ pred[upstream_vars, c(anthro_vars, baseline_vars, treat_vars)] <- 0
 pred[anthro_vars,   treat_vars] <- 0
 pred[baseline_vars, treat_vars] <- 0
 
-# IMPORTANT: prevent baseline↔baseline circularity (your failure mode)
+# prevent baseline↔baseline circularity 
 pred[baseline_vars, baseline_vars] <- 0
 diag(pred) <- 0
 
@@ -170,6 +173,8 @@ print(na_imputed[na_imputed > 0])   # should be numeric(0)
 
 # Optional diagnostics
 plot(imp)
+
+
 
 
 
@@ -287,6 +292,14 @@ compare_props <- function(imp_obj, var) {
 compare_props(imp, "T0_SYMPT_TREATMENT")
 compare_props(imp_reverse_order, "T0_SYMPT_TREATMENT")
 
+fit1 <- with(imp, glm(Suspension ~ AGE + SEX + ANTIBODY + ..., family=binomial))
+p1 <- pool(fit1)
+
+fit2 <- with(imp_reverse_order, glm(Suspension ~ AGE + SEX + ANTIBODY + ..., family=binomial))
+p2 <- pool(fit2)
+
+summary(p1)
+summary(p2)
 
 # Create a folder
 dir.create("imputed_data", showWarnings = FALSE)
@@ -306,154 +319,12 @@ should_be_complete <- names(imp$method)[imp$method != ""]
 na_imputed <- colMeans(is.na(df1[, should_be_complete, drop = FALSE]))
 na_imputed[na_imputed > 0]
 
-rm(list = c("imp", "df1"), envir = .GlobalEnv)
-
-# sanity: check your current methods & predictors
-print(names(meth)[meth != ""])
-print(head(which(rowSums(pred[names(meth)[meth != ""], , drop=FALSE]) == 0)))
-
-# --- Run mice with the CURRENT meth/pred
-imp <- mice(
-  df_baseline_clean,
-  method          = meth,
-  predictorMatrix = pred,
-  visitSequence   = visit_order,
-  where           = where_mat,   
-  m               = 10,
-  maxit           = 5,
-  seed            = 123,
-  printFlag       = TRUE
-)
-
-# --- Now create df1 from THIS imp
-df3 <- complete(imp, 1)
-
-should_be_complete <- names(imp$method)[imp$method != ""]
-na_imputed <- colMeans(is.na(df3[, should_be_complete, drop = FALSE]))
-na_imputed[na_imputed > 0]
-
-imp$loggedEvents
-
-to_impute <- names(imp$method)[imp$method != ""]
-
-setdiff(to_impute, imp$visitSequence)
-
-
-problem_vars <- names(na_imputed[na_imputed > 0])
-
-# How many predictors does each have (in the ACTUAL matrix used)?
-rowSums(imp$predictorMatrix[problem_vars, , drop = FALSE])
-
-
-
-problem_vars <- names(na_imputed[na_imputed > 0])
-
-check_imp <- t(sapply(problem_vars, function(v) {
-  n_mis <- sum(is.na(df_baseline_clean[[v]]))
-  imp_block <- imp$imp[[v]]
-  n_imp_rows <- if (is.null(imp_block)) 0L else nrow(imp_block)
-  n_imp_cols <- if (is.null(imp_block)) 0L else ncol(imp_block)
-  n_imp_na   <- if (is.null(imp_block)) NA_integer_ else sum(is.na(as.matrix(imp_block)))
-  c(missing_in_data = n_mis, imp_rows = n_imp_rows, imp_cols = n_imp_cols, na_inside_imp = n_imp_na)
-}))
-
-check_imp
-
-library(mice)
-
-# HARD RESET: prevent stale objects
-rm(list = c("imp", "df1", "df3", "na_imputed", "should_be_complete"), envir = .GlobalEnv)
-
-# Build where explicitly from the CURRENT data
-where_mat <- is.na(df_baseline_clean)
-
-# Run mice WITH where (critical)
-imp <- mice(
-  df_baseline_clean,
-  method          = meth,
-  predictorMatrix = pred,
-  visitSequence   = unique(c(visit_order, names(meth)[meth != ""])),
-  where           = where_mat,
-  m               = 10,
-  maxit           = 20,
-  seed            = 123,
-  printFlag       = TRUE
-)
-
-# 1) Verify that imp$where really matches what you intended
-cat("where identical to is.na(data): ", identical(imp$where, where_mat), "\n")
-
-# 2) Verify that missing cells are eligible for imputation (example: SIDE)
-v <- "SIDE"
-idx <- which(is.na(df_baseline_clean[[v]]))
-cat("SIDE missing cells where==TRUE: ", all(imp$where[idx, v]), "\n")
-
-# 3) Now check completion
-df1 <- complete(imp, 1)
-should_be_complete <- names(imp$method)[imp$method != ""]
-na_imputed <- colMeans(is.na(df1[, should_be_complete, drop = FALSE]))
-na_imputed[na_imputed > 0]
 
 
 
 
-#test categorical 
-
-vars_cat <- names(meth)[meth %in% c("logreg", "polyreg")]
-
-prop_by_imp <- function(imp_obj, v) {
-  # union of levels seen across imputations
-  levs <- sort(unique(unlist(lapply(1:imp_obj$m, function(k) levels(complete(imp_obj, k)[[v]])))))
-  if (length(levs) == 0) levs <- sort(unique(unlist(lapply(1:imp_obj$m, function(k) as.character(complete(imp_obj, k)[[v]])))))
-  
-  # K x L matrix: imputations x levels
-  P <- sapply(1:imp_obj$m, function(k) {
-    x <- complete(imp_obj, k)[[v]]
-    x <- factor(x, levels = levs)
-    prop.table(table(x))
-  })
-  # ensure matrix
-  if (is.null(dim(P))) P <- matrix(P, nrow = length(levs), dimnames = list(levs, NULL))
-  t(P)  # m x L
-}
-
-# distance between two mean-proportion vectors (L1 / total variation*2)
-dist_L1 <- function(p, q) sum(abs(p - q))
-
-cmp_cat <- do.call(rbind, lapply(vars_cat, function(v) {
-  Pc <- prop_by_imp(imp, v)
-  Pd <- prop_by_imp(imp_default_order, v)
-  Pr <- prop_by_imp(imp_reverse_order, v)
-  
-  pbar_c <- colMeans(Pc)
-  pbar_d <- colMeans(Pd)
-  pbar_r <- colMeans(Pr)
-  
-  data.frame(
-    variable = v,
-    L1_cur_def = dist_L1(pbar_c, pbar_d),
-    L1_cur_rev = dist_L1(pbar_c, pbar_r),
-    stringsAsFactors = FALSE
-  )
-}))
-
-cmp_cat
 
 
-#----
 
-out_dir <- "C:/Users/aless/Desktop/medical applications/data/imputed/"
 
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-
-for (k in 1:imp$m) {
-  d <- complete(imp, k)
-  d$BMI <- d$WEIGHT / (d$HEIGHT^2)  # optional
-  
-  write.csv(
-    d,
-    file = file.path(out_dir, sprintf("df_baseline_imputed_m%02d.csv", k)),
-    row.names = FALSE
-  )
-}
 
