@@ -333,7 +333,34 @@ summary(pooled_baseline_trend, conf.int = TRUE)
 
 
 
+check_range <- function(x, lo = -Inf, hi = Inf) {
+  !is.na(x) & (x < lo | x > hi)
+}
+
+bad_hit6 <- check_range(df_long$HIT6, 36, 78)
+bad_hadsa <- check_range(df_long$HADSA, 0, 21)
+bad_hadsd <- check_range(df_long$HADSD, 0, 21)
+
+sum(bad_hit6)
+sum(bad_hadsa)
+sum(bad_hadsd)
+
+df_long[bad_hadsa, c("SUBJECT_ID","CYCLE","MONTH","HADSA")]
 
 
 
+
+
+folder <- "C:/Users/aless/Desktop/medical applications/data/imputed/imputed_longitudinal"
+
+files <- list.files(folder, pattern = "\\.csv$", full.names = TRUE)
+files <- sort(files)  # ensure imp_01, imp_02, ... order
+
+completed_list <- lapply(files, read.csv, stringsAsFactors = FALSE)
+
+imp_long_reloaded <- miceadds::datlist2mids(completed_list)
+
+
+fit <- with(imp_long_reloaded, lm(MMDs ~ CYCLE + MONTH))
+pool(fit)
 

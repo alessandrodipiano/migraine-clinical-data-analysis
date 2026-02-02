@@ -331,10 +331,3 @@ complete_data$BMI <- complete_data$WEIGHT / (complete_data$HEIGHT/100)^2
 
 
 
-
-
-
-
-
-#diste
-#----------------------------------------------------
