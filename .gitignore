@@ -48,3 +48,4 @@ Thumbs.db
 .mypy_cache/
 .pytest_cache/
 *.code-workspace
+.Rproj.user
