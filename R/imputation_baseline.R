@@ -321,7 +321,8 @@ summary(p2)
 
 
 
-
+complete_data <- complete(imp, "long", include = TRUE)
+complete_data$BMI <- complete_data$WEIGHT / (complete_data$HEIGHT/100)^2
 
 
 

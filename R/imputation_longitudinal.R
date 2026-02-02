@@ -5,7 +5,8 @@ library(tidyr)
 library(miceadds)   
 exists("mice.impute.2l.pmm")
 
-
+df_long <- read.csv("C:/Users/aless/Desktop/medical applications/data/cleaned/df_longitudinal_clean.csv", header=TRUE)
+View(df_long)
 
 
 df_long$SUBJECT_ID <- as.integer(df_long$SUBJECT_ID)
@@ -64,7 +65,7 @@ imp_long <- mice(
 
 
 plot(imp_long)
-
+saveRDS(imp_long, file = "imp_long.rds")
 
 
 
@@ -327,4 +328,22 @@ fit_baseline_trend <- with(imp_long, {
 
 pooled_baseline_trend <- pool(fit_baseline_trend)
 summary(pooled_baseline_trend, conf.int = TRUE)
+
+
+
+
+dir.create("imputed_csv", showWarnings = FALSE)
+
+for (k in 1:imp_long$m) {
+  dfk <- complete(imp_long, k)
+  write.csv(
+    dfk,
+    file = sprintf("imputed_csv/df_long_imp_%02d.csv", k),
+    row.names = FALSE
+  )
+}
+
+
+
+
 
