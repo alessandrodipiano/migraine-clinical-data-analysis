@@ -19,11 +19,11 @@ ENV/
 ############################
 # R / RStudio
 ############################
-.Rproj.user/
+
 .Rhistory
 .RData
 .Ruserdata
-*.Rproj
+
 
 ############################
 # OS / Editor noise

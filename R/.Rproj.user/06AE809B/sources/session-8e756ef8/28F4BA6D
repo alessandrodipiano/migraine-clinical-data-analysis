@@ -1,0 +1,28 @@
+{
+    "id": "28F4BA6D",
+    "path": null,
+    "project_path": null,
+    "type": "object_explorer",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1770042276275.0,
+    "source_on_save": false,
+    "relative_order": 6,
+    "properties": {
+        "id": "032871ab63c644ef9f1b18453f092938",
+        "name": "imp_stage1",
+        "title": "imp_stage1",
+        "language": "R",
+        "source_window_id": "",
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 4619567317775286272,
+    "encoding": "",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1770042276275,
+    "read_only": false,
+    "read_only_alternatives": []
+}
