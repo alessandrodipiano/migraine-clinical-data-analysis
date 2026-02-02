@@ -47,3 +47,4 @@ Thumbs.db
 .cache/
 .mypy_cache/
 .pytest_cache/
+*.code-workspace
