@@ -332,16 +332,6 @@ summary(pooled_baseline_trend, conf.int = TRUE)
 
 
 
-dir.create("imputed_csv", showWarnings = FALSE)
-
-for (k in 1:imp_long$m) {
-  dfk <- complete(imp_long, k)
-  write.csv(
-    dfk,
-    file = sprintf("imputed_csv/df_long_imp_%02d.csv", k),
-    row.names = FALSE
-  )
-}
 
 
 
