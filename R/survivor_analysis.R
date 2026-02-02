@@ -13,5 +13,4 @@ completed_list <- lapply(files, read.csv, stringsAsFactors = FALSE)
 
 imp_long_reloaded <- miceadds::datlist2mids(completed_list)
 
-fit <- with(imp_long_reloaded, lm(MMDs ~ CYCLE + MONTH))
-pool(fit)
+#da qui giu lavora
