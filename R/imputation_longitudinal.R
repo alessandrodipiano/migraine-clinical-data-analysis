@@ -278,3 +278,53 @@ cat("MICE RMSE across imputations:\n")
 cat("  mean =", rmse_mice_mean, "\n")
 cat("  sd   =", rmse_mice_sd, "\n\n")
 cat("MICE pooled-mean RMSE =", rmse_mice_pooled, "\n")
+
+
+
+
+
+
+
+
+first_minus_last <- function(df) {
+  df %>%
+    group_by(SUBJECT_ID, CYCLE) %>%
+    summarise(
+      diff_mmd = MMDs[which.min(MONTH)] - MMDs[which.max(MONTH)],
+      .groups = "drop"
+    )
+}
+
+fit <- with(imp_long, {
+  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)  
+  d   <- first_minus_last(dfk)
+  lm(diff_mmd ~ 1, data = d)                       
+})
+
+pooled <- pool(fit)
+summary(pooled, conf.int = TRUE)
+
+fit_cycle <- with(imp_long, {
+  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
+  d   <- first_minus_last(dfk)
+  lm(diff_mmd ~ factor(CYCLE) - 1, data = d)
+})
+
+summary(pool(fit_cycle), conf.int = TRUE)
+
+
+
+library(mice)
+library(lme4)
+
+fit_baseline_trend <- with(imp_long, {
+  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
+  dfb <- dfk[dfk$MONTH == 1, ]  # baseline within each cycle
+  
+  # Treat cycle as ordered numeric (tests linear trend C1 -> C2 -> C3)
+  lmer(MMDs ~ as.numeric(CYCLE) + (1 | SUBJECT_ID), data = dfb)
+})
+
+pooled_baseline_trend <- pool(fit_baseline_trend)
+summary(pooled_baseline_trend, conf.int = TRUE)
+

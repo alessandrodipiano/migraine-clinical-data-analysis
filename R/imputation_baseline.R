@@ -9,6 +9,8 @@ names(df_baseline_clean)[names(df_baseline_clean) == "HEIGTH"] <- "HEIGHT"
 df_baseline_clean$BMI <- NULL
 
 
+
+
 #GROUPS 
 #----------------------------------------------
 cont_vars <- c("AGE","MONTHS_OF_TREAT","AGE_OF_ONSET","AGE_W_CHRONICMIGRAINE",
@@ -58,10 +60,13 @@ ini  <- mice(df_baseline_clean, maxit = 0, printFlag = FALSE)
 meth <- ini$method
 pred <- ini$predictorMatrix
 
+has_miss <- names(which(colSums(is.na(df_baseline_clean)) > 0))
+meth[setdiff(names(meth), has_miss)] <- ""
 
-meth[cont_vars]  <- "pmm"
-meth[bin_vars]   <- "logreg"
-meth[multi_vars] <- "polyreg"
+
+meth[intersect(cont_vars,  has_miss)]  <- "pmm"
+meth[intersect(bin_vars,   has_miss)]  <- "logreg"
+meth[intersect(multi_vars, has_miss)]  <- "polyreg"
 
 
 if ("SUBJECT_ID" %in% names(meth)) meth["SUBJECT_ID"] <- ""
@@ -109,59 +114,30 @@ bad <- to_impute[rowSums(pred[to_impute, , drop = FALSE]) == 0]
 print(bad)
 stopifnot(length(bad) == 0)
 
-# -----------------------------
-# 5) TWO-STAGE IMPUTATION
-# -----------------------------
-# Stage 1: initialize predictors so categorical models don't see NA covariates
-stage1_vars <- unique(intersect(
-  c(upstream_vars, anthro_vars, "GGCEF_T0", "INT_T0", "MONTHS_OF_TREAT"),
-  names(meth)
-))
 
-meth1 <- meth
-meth1[setdiff(names(meth1), stage1_vars)] <- ""  # only impute stage1 vars
-meth1[true_anchor] <- ""                         # still never impute anchors
+pred[baseline_vars, baseline_vars] <- 1
+diag(pred) <- 0
+pred[baseline_vars, treat_vars] <- 0  # still block treatments -> baseline
 
-pred1 <- pred
-pred1[,] <- 0
-pred1[stage1_vars, true_anchor] <- 1
 
-# allow stage1 vars to use each other ONLY if you want (usually not needed)
-# pred1[stage1_vars, stage1_vars] <- 0
-diag(pred1) <- 0
-
-where1 <- is.na(df_baseline_clean)
-
-imp_stage1 <- mice(
-  df_baseline_clean,
-  method          = meth1,
-  predictorMatrix = pred1,
-  where           = where1,
-  m               = 1,
-  maxit           = 10,
-  seed            = 123,
-  printFlag       = FALSE
-)
-
-df_stage1 <- complete(imp_stage1, 1)
-
-# Stage 2: full imputation on top of initialized predictors
-where2 <- is.na(df_stage1)
-
-visit2 <- unique(c(upstream_vars, anthro_vars, baseline_vars, treat_vars, to_impute))
-visit2 <- visit2[visit2 %in% to_impute]
+# Ensure visit order respects your causal layers
+to_impute <- names(meth)[meth != ""]
+visit <- c(upstream_vars, anthro_vars, baseline_vars, treat_vars)
+visit <- visit[visit %in% to_impute]
 
 imp <- mice(
-  df_stage1,
+  df_baseline_clean,
   method          = meth,
   predictorMatrix = pred,
-  where           = where2,
-  visitSequence   = visit2,
-  m               = 10,
-  maxit           = 20,
+  m               = 20,     # I'd use >=20 with ~50% missingness
+  maxit           = 30,
   seed            = 123,
+  visitSequence   = visit,
   printFlag       = TRUE
 )
+
+df1 <- complete(imp, 1)
+plot(imp)
 
 # -----------------------------
 # 6) Validate: imputed vars should have no NA
@@ -171,8 +147,7 @@ should_be_complete <- names(imp$method)[imp$method != ""]
 na_imputed <- colMeans(is.na(df1[, should_be_complete, drop = FALSE]))
 print(na_imputed[na_imputed > 0])   # should be numeric(0)
 
-# Optional diagnostics
-plot(imp)
+
 
 
 
@@ -289,17 +264,29 @@ compare_props <- function(imp_obj, var) {
   })
 }
 
+
+
+colSums(is.na(df_baseline_clean))[c("Suspension","TREATMENT_DISC","FAMILIARITY","ANTIBODY")]
+
+
+
+
+
 compare_props(imp, "T0_SYMPT_TREATMENT")
 compare_props(imp_reverse_order, "T0_SYMPT_TREATMENT")
 
-fit1 <- with(imp, glm(Suspension ~ AGE + SEX + ANTIBODY + ..., family=binomial))
+fit1 <- with(imp, glm(Suspension ~ AGE + SEX + ANTIBODY , family=binomial))
 p1 <- pool(fit1)
 
-fit2 <- with(imp_reverse_order, glm(Suspension ~ AGE + SEX + ANTIBODY + ..., family=binomial))
+fit2 <- with(imp_reverse_order, glm(Suspension ~ AGE + SEX + ANTIBODY , family=binomial))
 p2 <- pool(fit2)
 
 summary(p1)
 summary(p2)
+
+
+
+
 
 # Create a folder
 dir.create("imputed_data", showWarnings = FALSE)
@@ -321,6 +308,14 @@ na_imputed[na_imputed > 0]
 
 
 
+fit1 <- with(imp, glm(Suspension ~ AGE + SEX + ANTIBODY , family=binomial))
+p1 <- pool(fit1)
+
+fit2 <- with(imp_reverse_order, glm(Suspension ~ AGE + SEX + ANTIBODY , family=binomial))
+p2 <- pool(fit2)
+
+summary(p1)
+summary(p2)
 
 
 
@@ -328,3 +323,17 @@ na_imputed[na_imputed > 0]
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+#diste
+#----------------------------------------------------
