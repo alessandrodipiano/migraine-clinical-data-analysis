@@ -347,7 +347,22 @@ sum(bad_hadsd)
 
 df_long[bad_hadsa, c("SUBJECT_ID","CYCLE","MONTH","HADSA")]
 
+output_dir <- "C:/Users/aless/Desktop/medical applications/data/imputed/imputed_longitudinal"
 
+
+for (i in 1:imp_long$m) {
+  # Extract the i-th completed dataset
+  temp_df <- complete(imp_long, i)
+  
+  # Generate a dynamic filename
+  file_name <- sprintf("imputed_dataset_fully_long%02d.csv", i)
+  
+  # Write to the folder
+  write.csv(temp_df, 
+            file = file.path(output_dir, file_name), 
+            row.names = FALSE)
+}
+message(sprintf("Successfully exported %d individual CSV files.", imp_long$m))
 
 
 
