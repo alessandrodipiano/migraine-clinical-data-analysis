@@ -287,86 +287,8 @@ cat("  sd   =", rmse_mice_sd, "\n\n")
 cat("MICE pooled-mean RMSE =", rmse_mice_pooled, "\n")
 
 
-
-df_long_work %>%
-  arrange(SUBJECT_ID, CYCLE, MONTH) %>%
-  group_by(SUBJECT_ID, CYCLE) %>%
-  summarise(
-    n = n(),
-    na_total = sum(is.na(MMDs)),
-    na_first = is.na(MMDs[which.min(MONTH)]),
-    na_last  = is.na(MMDs[which.max(MONTH)]),
-    .groups = "drop"
-  ) %>%
-  summarise(
-    cycles_with_any_na = sum(na_total > 0),
-    cycles_na_at_first = sum(na_first, na.rm=TRUE),
-    cycles_na_at_last  = sum(na_last,  na.rm=TRUE)
-  )
-
-
-
-
-
-library(dplyr)
-
-first_minus_last_sched <- function(df) {
-  df %>%
-    group_by(SUBJECT_ID, CYCLE) %>%
-    summarise(
-      mmd_m1  = MMDs[MONTH == 1][1],
-      mmd_m12 = MMDs[MONTH == 12][1],
-      diff_mmd = mmd_m1 - mmd_m12,
-      .groups = "drop"
-    ) %>%
-    filter(!is.na(mmd_m1) & !is.na(mmd_m12))
-}
-
   
-fit_overall <- with(imp_long, {
-  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
-  d   <- first_minus_last_sched(dfk)
-  lm(diff_mmd ~ 1, data = d)
-})
 
-summary(pool(fit_overall), conf.int = TRUE)
-
-  
-fit_cycle <- with(imp_long, {
-  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
-  d   <- first_minus_last_sched(dfk)
-  lm(diff_mmd ~ factor(CYCLE) - 1, data = d)
-})
-
-summary(pool(fit_cycle), conf.int = TRUE)
-
-library(lme4)
-
-fit_baseline_trend <- with(imp_long, {
-  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
-  dfb <- dfk %>% filter(MONTH == 1)
-  lmer(MMDs ~ as.numeric(CYCLE) + (1 | SUBJECT_ID), data = dfb)
-})
-
-summary(pool(fit_baseline_trend), conf.int = TRUE)
-
-fit_cycle_test <- with(imp_long, {
-  dfk <- data.frame(SUBJECT_ID, CYCLE, MONTH, MMDs)
-  d   <- first_minus_last_sched(dfk)
-  lm(diff_mmd ~ factor(CYCLE), data = d)
-})
-
-summary(pool(fit_cycle_test), conf.int = TRUE)
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
   
   check_range <- function(x, lo = -Inf, hi = Inf) {
     !is.na(x) & (x < lo | x > hi)

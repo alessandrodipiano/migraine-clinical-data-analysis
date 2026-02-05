@@ -8,6 +8,65 @@ length(full_list)
 
 anyNA(full_list[[1]])
 
+
+
+
+
+
+
+
+library(dplyr)
+library(mice)
+library(lme4)
+library(broom.mixed)
+
+
+
+
+calc_diffs <- function(df) {
+  df %>%
+    group_by(SUBJECT_ID, CYCLE) %>%
+    summarise(
+      mmd_m1   = MMDs[MONTH == 1][1],
+      mmd_m12  = MMDs[MONTH == 12][1],
+      diff_mmd = mmd_m1 - mmd_m12,
+      .groups = "drop"
+    ) %>%
+    filter(!is.na(diff_mmd))
+}
+
+# ---- 3. The "List-to-Pool" Workflow
+# Since with(imp_long, ...) fails on a list, we use lapply + as.mira
+
+# A. Model: Overall Mean Reduction
+fit_overall_list <- lapply(full_list, function(df) {
+  d <- calc_diffs(df)
+  lm(diff_mmd ~ 1, data = d)
+})
+pooled_overall <- pool(as.mira(fit_overall_list))
+
+# B. Model: Per-Cycle Contrast (Testing if Cycle X differs from Cycle 1)
+fit_cycle_test_list <- lapply(full_list, function(df) {
+  d <- calc_diffs(df)
+  lm(diff_mmd ~ factor(CYCLE), data = d)
+})
+pooled_cycle_test <- pool(as.mira(fit_cycle_test_list))
+
+# C. Model: Baseline Trend (Mixed Effects)
+fit_lme_list <- lapply(full_list, function(df) {
+  df_base <- df %>% filter(MONTH == 1)
+  # Using lmer for longitudinal subjects
+  lmer(MMDs ~ as.numeric(CYCLE) + (1 | SUBJECT_ID), data = df_base)
+})
+pooled_lme <- pool(as.mira(fit_lme_list))
+
+# ---- 4. Results Extraction
+summary(pooled_overall, conf.int = TRUE)
+summary(pooled_cycle_test, conf.int = TRUE)
+summary(pooled_lme, conf.int = TRUE)
+
+
+
 library(dplyr)
 
 cycle_response <- function(df) {
@@ -26,10 +85,7 @@ cycle_response <- function(df) {
       resp_50 = perc_reduction >= 0.50
     )
 }
-library(dplyr)
 
-# 0) Sanity: full datasets contain NA because post-LTFU rows were reattached (expected)
-anyNA(full_list[[1]])
 
 # 1) Compute responder summaries within each imputation
 resp_by_imp <- lapply(full_list, function(dfj) {
@@ -99,4 +155,9 @@ resp_table <- resp_pooled_fix %>%
   select(CYCLE, n, resp30_pct, resp50_pct)
 
 resp_table
+
+
+
+
+
 
