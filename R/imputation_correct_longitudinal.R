@@ -19,6 +19,13 @@ df_base$MONTHS_OF_TREAT <- as.integer(df_base$MONTHS_OF_TREAT)
 
 df_long <- read.csv("C:/Users/aless/Desktop/medical applications/data/cleaned/df_longitudinal_clean.csv", header=TRUE)
 View(df_long)
+
+
+
+
+
+
+
 # ---- Join baseline onto longitudinal + define absolute treatment time
 df_long <- df_long %>%
   left_join(df_base %>% select(SUBJECT_ID, Suspension, MONTHS_OF_TREAT),
@@ -46,6 +53,21 @@ summary(df_long$MONTHS_OF_TREAT)
 df_long_work <- df_long %>%
   filter(in_window) %>%
   select(-Suspension, -MONTHS_OF_TREAT, -t_abs, -in_window)  # keep clean for imputation
+
+
+library(lme4)
+# Model 1: Fixed Trend (Your current setup)
+fit1 <- lmer(MMDs ~ CYCLE + (1 | SUBJECT_ID), data = df_long_work)
+# Model 2: Random Trend (Proposed setup)
+fit2 <- lmer(MMDs ~ CYCLE + (CYCLE | SUBJECT_ID), data = df_long_work)
+
+anova(fit1, fit2) # Lower AIC/BIC indicates the better method
+df_long$SUBJECT_ID <- as.integer(df_long$SUBJECT_ID)
+df_long$CYCLE <- as.integer(df_long$CYCLE)
+df_long$MONTH <- as.integer(df_long$MONTH)
+
+
+
 library(mice)
 library(miceadds)
 
@@ -75,7 +97,7 @@ meth[c(cluster_var, time_vars)] <- ""  # do not impute ID/time
 # Predictor matrix
 pred[,] <- 0
 pred[, cluster_var] <- -2              # random intercept per subject
-pred[cont_vars, time_vars] <- 1        # time predicts outcomes
+pred[cont_vars, time_vars] <- 1       # time predicts outcomes
 pred[cont_vars, cont_vars] <- 1        # outcomes predict each other
 diag(pred) <- 0
 pred[time_vars, ] <- 0                 # time vars not targets
@@ -500,5 +522,11 @@ c(
   imputed_in_window           = n_imp_in_window,
   full_longitudinal_saved     = n_full_csv
 )
+
+
+
+
+
+
 
 

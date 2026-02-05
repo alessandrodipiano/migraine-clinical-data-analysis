@@ -9,10 +9,6 @@ df_long <- read.csv("C:/Users/aless/Desktop/medical applications/data/cleaned/df
 View(df_long)
 
 
-df_long$SUBJECT_ID <- as.integer(df_long$SUBJECT_ID)
-df_long$CYCLE <- as.integer(df_long$CYCLE)
-df_long$MONTH <- as.integer(df_long$MONTH)
-
 # Drop derived variable (correct)
 if ("RED_MMD_VST01" %in% names(df_long)) df_long <- subset(df_long, select = -RED_MMD_VST01)
 

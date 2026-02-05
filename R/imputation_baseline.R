@@ -288,15 +288,14 @@ summary(p2)
 
 
 
-# Create a folder
-dir.create("imputed_data", showWarnings = FALSE)
+folder <- "C:/Users/aless/Desktop/medical applications/data/imputed/imputed_baseline"
+dir.create(folder, showWarnings = FALSE, recursive = TRUE)
 
-# Export each completed dataset
 for (k in 1:imp$m) {
   df_k <- complete(imp, k)
   write.csv(
     df_k,
-    file = sprintf("imputed_data/imputed_%02d.csv", k),
+    file = file.path(folder, sprintf("imputed_%02d.csv", k)),
     row.names = FALSE
   )
 }
