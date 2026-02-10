@@ -196,32 +196,7 @@ This shows that the average number of observations in 5 bins is less than 2,
 which is not favorable.
 
 3 bins are also easier to interpret for us; hence, we decide to use only 3 bins,
-which are the 3 cycles we have in the study. The only metric 5 bins perform 
-better is the RMSE:
-
-```{r RMSE}
-# --- RMSE ---
-recon_rmse <- function(df_long, bin_col){
-  df_long %>%
-    group_by(patient_id, bin = .data[[bin_col]]) %>%
-    mutate(bin_mean = mean(MMD, na.rm = TRUE)) %>%
-    ungroup() %>%
-    group_by(patient_id) %>%
-    summarise(rmse = sqrt(mean((MMD - bin_mean)^2, na.rm = TRUE)),
-              .groups = "drop")
-}
-
-rmse3 <- recon_rmse(df_long3, "bin3") %>% mutate(bins = "3 bins")
-rmse5 <- recon_rmse(df_long5, "bin5") %>% mutate(bins = "5 bins")
-rmse_all <- bind_rows(rmse3, rmse5)
-
-ggplot(rmse_all, aes(bins, rmse, fill = bins)) +
-  geom_boxplot(alpha = 0.8, outlier.alpha = 0.3) +
-  labs(title = "Reconstruction error (RMSE): 3 bins vs 5 bins", x = NULL, y = "RMSE") +
-  theme_minimal(base_size = 11) +
-  theme(legend.position = "none")
-
-```
+which are the 3 cycles we have in the study. 
 
 ### Statistics per Bins
 
@@ -311,26 +286,93 @@ To find the right number of clusters, we compare the silhouette coefficients
 of various cluster numbers. 
 
 ```{r clustering}
+
 # Compare clustering quality
-run_kmeans <- function(feat_df, k = 3, seed = 123, nstart = 5) {
-  # safer column selection
+run_kmeans <- function(feat_df, k = 3, seed = 123, nstart = 5, iter.max = 50) {
   X_raw <- feat_df %>%
     dplyr::select(-patient_id)
 
-  # mean-impute BEFORE scaling (neutral)
-  for (j in seq_len(ncol(X_raw))) {
-    mj <- mean(X_raw[[j]], na.rm = TRUE)
-    X_raw[[j]][is.na(X_raw[[j]])] <- mj
-  }
-
+  # scale with NA support (center/scale computed columnwise ignoring NA)
   X <- scale(X_raw)
 
-  set.seed(seed)
-  km <- kmeans(X, centers = k, nstart = nstart)
+  # ---- missingness-aware kmeans (uses only observed dims per row) ----
+  kmeans_na <- function(X, k, nstart, iter.max, seed) {
+    set.seed(seed)
 
-  # silhouette (only meaningful if k >= 2 and no all-in-one cluster)
-  sil <- cluster::silhouette(km$cluster, dist(X))
-  mean_sil <- mean(sil[, "sil_width"])
+    n <- nrow(X)
+    p <- ncol(X)
+
+    # distance from one row to all centers using only observed dims
+    dist_row_to_centers <- function(x, centers) {
+      obs <- is.finite(x)
+      if (!any(obs)) return(rep(Inf, nrow(centers)))
+      # normalize by number of observed dims so people with fewer obs aren't auto "closer"
+      colMeans((t(centers[, obs, drop = FALSE]) - x[obs])^2)
+    }
+
+    best <- NULL
+    best_tot_within <- Inf
+
+    for (s in seq_len(nstart)) {
+      # init: pick k rows with most observed entries (and at least 1 observed)
+      obs_count <- rowSums(is.finite(X))
+      init_pool <- which(obs_count > 0)
+      init_pool <- init_pool[order(obs_count[init_pool], decreasing = TRUE)]
+      init_idx <- sample(init_pool[seq_len(min(length(init_pool), max(k * 5, k)))], k)
+
+      centers <- X[init_idx, , drop = FALSE]
+      cl <- rep(NA_integer_, n)
+
+      for (it in seq_len(iter.max)) {
+        # assign
+        new_cl <- vapply(seq_len(n), \(i) {
+          d <- dist_row_to_centers(X[i, ], centers)
+          which.min(d)
+        }, integer(1))
+
+        if (identical(new_cl, cl)) break
+        cl <- new_cl
+
+        # update centers feature-wise using available data in each cluster
+        for (g in seq_len(k)) {
+          idx <- which(cl == g)
+          if (length(idx) == 0) next
+          for (j in seq_len(p)) {
+            vals <- X[idx, j]
+            if (any(is.finite(vals))) {
+              centers[g, j] <- mean(vals, na.rm = TRUE)
+            }
+            # else keep previous center[g, j]
+          }
+        }
+      }
+
+      # total within (using observed dims only)
+      tot_within <- sum(vapply(seq_len(n), \(i) {
+        g <- cl[i]
+        obs <- is.finite(X[i, ])
+        if (!any(obs)) return(0)
+        mean((X[i, obs] - centers[g, obs])^2)
+      }, numeric(1)))
+
+      if (tot_within < best_tot_within) {
+        best_tot_within <- tot_within
+        best <- list(cluster = cl, centers = centers, tot.withinss = tot_within, iter = it)
+      }
+    }
+
+    best
+  }
+
+  km <- kmeans_na(X, k = k, nstart = nstart, iter.max = iter.max, seed = seed)
+
+  # silhouette: compute on complete cases only (cluster assignment still comes from NA-aware kmeans)
+  cc <- stats::complete.cases(X)
+  mean_sil <- NA_real_
+  if (sum(cc) > k) {
+    sil <- cluster::silhouette(km$cluster[cc], dist(X[cc, , drop = FALSE]))
+    mean_sil <- mean(sil[, "sil_width"])
+  }
 
   list(km = km, mean_sil = mean_sil, sizes = table(km$cluster))
 }
@@ -376,10 +418,10 @@ ggplot(size_df, aes(x = cluster, y = n, fill = k)) +
 
 ```
 
-From these numbers, creating 5 clusters seem to create a very small group of 4
+From these numbers, creating 5 clusters seem to create a very small group of 2
 instances. This is why we discard this option.
 
-Since the Silhouette's scores are comparable and the smallest group in k = 4 setting is 13 elements, we believe that this setting gives the best separation of the phenotype.
+Since the Silhouette's score for k=3 is the highest, we believe that this setting gives the best separation of the phenotypes.
 
 To visualize this separation, we plot the PCA:
 
@@ -401,14 +443,14 @@ pca <- prcomp(X_pca, center = FALSE, scale. = FALSE)
 pca_df <- data.frame(
   PC1 = pca$x[, 1],
   PC2 = pca$x[, 2],
-  cluster = factor(res4$km$cluster)
+  cluster = factor(res3$km$cluster)
 )
 
 ggplot(pca_df, aes(PC1, PC2, color = cluster, fill = cluster)) +
   stat_ellipse(
     geom = "polygon",
     type = "norm",   # assumes roughly elliptical distribution
-    level = 0.80,    # 80% ellipse (you can try 0.95 too)
+    level = 0.80,    # 80% ellipse 
     alpha = 0.08,    # very transparent fill
     linewidth = 0.8
   ) +
@@ -431,26 +473,27 @@ PCA was computed on the same feature matrix used for clustering, and cluster lab
 After clustering, we move on to visualize the trajectories of each cluster.
 
 ```{r trajectories}
-cluster_levels <- as.character(sort(unique(res4$km$cluster)))  # "1","2","3","4"
+cluster_levels <- as.character(sort(unique(res3$km$cluster)))  # "1","2","3"
 
-cluster_labels4 <- feat3 %>%
+cluster_labels3 <- feat3 %>%
   select(patient_id) %>%
-  mutate(cluster = factor(res4$km$cluster, levels = cluster_levels))
+  mutate(cluster = factor(res3$km$cluster, levels = cluster_levels))
 
-df_long_cl4 <- as.data.frame(avg_matrix) %>%
+df_long_cl3 <- as.data.frame(avg_matrix) %>%
   mutate(patient_id = rownames(avg_matrix)) %>%
   pivot_longer(-patient_id, names_to = "time", values_to = "MMD") %>%
   mutate(time = as.numeric(sub("t_", "", time))) %>%
-  left_join(cluster_labels4, by = "patient_id") %>%
+  left_join(cluster_labels3, by = "patient_id") %>%
   filter(!is.na(cluster)) %>%
   mutate(cluster = factor(cluster, levels = cluster_levels))
 
-cluster_cols <- c("1" = "#E41A1C",  # red
-                  "2" = "#377EB8",  # blue
-                  "3" = "#4DAF4A",  # green
-                  "4" = "#984EA3")  # purple
+cluster_cols <- c(
+  "1" = "#E41A1C",  # red
+  "2" = "#377EB8",  # blue
+  "3" = "#4DAF4A"   # green
+)
 
-centroid4 <- df_long_cl4 %>%
+centroid3 <- df_long_cl3 %>%
   dplyr::group_by(cluster, time) %>%
   dplyr::summarise(
     mean_MMD = mean(MMD, na.rm = TRUE),
@@ -462,10 +505,9 @@ centroid4 <- df_long_cl4 %>%
   dplyr::arrange(cluster, time)
 
 
-ggplot(centroid4, aes(x = time, y = mean_MMD, color = cluster, fill = cluster)) +
+ggplot(centroid3, aes(x = time, y = mean_MMD, color = cluster, fill = cluster)) +
   geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.15, color = NA) +
   geom_line(linewidth = 1.4) +
-#  geom_point(size = 2) +
   scale_x_continuous(breaks = c(1,3,6,9,12,16,18,21,24,27,31,33,36,39,42)) +
   scale_color_brewer(palette = "Set1") +
   scale_fill_brewer(palette = "Set1") +
@@ -486,7 +528,7 @@ ggplot(centroid4, aes(x = time, y = mean_MMD, color = cluster, fill = cluster)) 
 
 ```
 ```{r simplified trajectories}
-df_long_cl4 <- df_long_cl4 %>%
+df_long_cl3 <- df_long_cl3 %>%
   mutate(
     cycle = case_when(
       time <= 12 ~ "Cycle 1",
@@ -495,7 +537,7 @@ df_long_cl4 <- df_long_cl4 %>%
     )
   )
 
-centroid4_cycle <- df_long_cl4 %>%
+centroid3_cycle <- df_long_cl3 %>%
   group_by(cluster, cycle) %>%
   summarise(
     mean_MMD = mean(MMD, na.rm = TRUE),
@@ -506,7 +548,7 @@ centroid4_cycle <- df_long_cl4 %>%
   )
 
 ggplot(
-  centroid4_cycle,
+  centroid3_cycle,
   aes(x = cycle, y = mean_MMD, color = cluster, group = cluster, fill = cluster)
 ) +
   geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.2, color = NA) +
@@ -526,16 +568,13 @@ ggplot(
 
 ```
 
-From these trajectories, we can clearly see 4 groups:
+From these trajectories, we can clearly see 3 patient phenotypes:
 
-- Stable Gradual Responders: These patients respond to the drug, but the improvement is gradual. This trend can be seen in Cluster 1.
+- Non-Responders: These patients showed minimal response to the treatment. Their disease burden remained consistently high despite therapy. This trend can be seen in Cluster 1.
 
 - Rapid Responders: These patients showed quick response, even though there were some fluctuations. This response behavior is visible in Cluster 2.
 
-- Non-Responders: These patients showed minimal response to the treatment. Their disease burden remained consistently high despite therapy. This trend can be seen in Cluster 3.
-
-- Fluctuating Responders: These patients demonstrate treatment response, but with pronounced temporal instability and recurrent peaks of similar magnitude across cycles. This is shown by Cluster 4.
-
+- Fluctuating Responders: These patients demonstrate treatment response, but with pronounced temporal instability and recurrent peaks of similar magnitude across cycles. This is shown by Cluster 3.
 
 ### Non-Contributing Patients
 
@@ -544,12 +583,12 @@ For further analysis, we visualize the proportion of the patients who stopped co
 ```{r dropout}
 anti_join(
   data.frame(patient_id = rownames(avg_matrix)),
-  cluster_labels4,
+  cluster_labels3,
   by = "patient_id"
 ) %>% head()
 
 
-n_table <- df_long_cl4 %>%
+n_table <- df_long_cl3 %>%
   group_by(cluster, time) %>%
   summarise(
     n_obs = sum(!is.na(MMD)),
@@ -568,10 +607,7 @@ ggplot(n_table, aes(time, n_obs, color = cluster)) +
   scale_color_manual(values = cluster_cols, drop = FALSE) +
   scale_fill_manual(values = cluster_cols, drop = FALSE)
 ```
-We observe that the number of participants in clusters 1 and 4 are relatively stable, 
-which are stable responders and fluctuating burden responders. The biggest fall, on
-the other hand, is seen in Cluster 3 - Non Responders. 
+We observe that the number of participants in Cluster 3 is relatively stable, 
+corresponding to fluctuating burden responders. On the other hand, we see a big fall in the number of participants in the Non-Responders and the Rapid Responders clusters. 
 
-This pattern suggests an association between treatment response phenotype and study retention, with poorer treatment response potentially linked to higher dropout rates.
-
-Patients matching the 'Non-Responder' phenotype in the first cycle are at high risk of dropout. These patients could be stratified early for alternative treatments rather than continuing the current therapy.
+This pattern suggests an association between treatment response phenotype and study retention, with especially poorer treatment response potentially linked to higher dropout rates. These results can be useful in stratifying the patients. For instance, since patients with non-responder phenotype in the first circle have a high risk of drop out, they could be stratified early for alternative treatments rather than continuing the current therapy.
