@@ -600,13 +600,14 @@ ggplot(n_table, aes(time, n_obs, color = cluster)) +
   theme_minimal() +
   labs(
     title = "Number of Patients Contributing over Time",
-    x = "Month (absolute time)",
-    y = "Number of patients observed",
+    x = "Month",
+    y = "Number of Patients Observed",
     color = "Cluster"
   ) +
   scale_color_manual(values = cluster_cols, drop = FALSE) +
   scale_fill_manual(values = cluster_cols, drop = FALSE)
 ```
+
 We observe that the number of participants in Cluster 3 is relatively stable, 
 corresponding to fluctuating burden responders. On the other hand, we see a big fall in the number of participants in the Non-Responders and the Rapid Responders clusters. 
 
