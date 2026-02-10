@@ -1,0 +1,577 @@
+---
+title: "Medical_ver2"
+output: html_document
+date: "2026-02-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(diceR)
+library(corrplot)
+```
+
+### Alignment
+
+We start by aligning time-series data by mapping them onto an absolute time
+sequence.
+
+```{r load_data}
+
+# paths to the files
+file_names <- list.files(path = "/users/pelinsutopaloglu/desktop/Classes/Year 3/Medical Applications/data", 
+                         pattern = "\\.csv$", 
+                         full.names = TRUE)
+
+time_grid <- c(
+  # Cycle 1
+  1, 3, 6, 9, 12,
+  # Cycle 2 (after 3-month suspension)
+  16, 18, 21, 24, 27,
+  # Cycle 3
+  31, 33, 36, 39, 42
+)
+
+
+# define a processing function 
+process_one_file <- function(file_path, time_grid) {
+
+  d <- read_csv(file_path, show_col_types = FALSE) %>%
+    transmute(
+      patient_id = SUBJECT_ID,
+      cycle = CYCLE,
+      month = MONTH,
+      mmd = MMDs,
+      t_abs = (CYCLE - 1) * 15 + MONTH
+    ) %>%
+    group_by(patient_id, t_abs) %>%
+    summarise(mmd = mean(mmd, na.rm = TRUE), .groups = "drop")
+
+  # enforce identical time grid for everyone
+  d_complete <- d %>%
+    tidyr::complete(
+      patient_id,
+      t_abs = time_grid
+    )
+
+  d_wide <- d_complete %>%
+    pivot_wider(
+      names_from = t_abs,
+      values_from = mmd,
+      names_prefix = "t_"
+    ) %>%
+    # sort by Patient ID so all files match
+    arrange(patient_id) %>%
+    as.data.frame()
+  
+  d_wide <- d_wide %>% select(patient_id, paste0("t_", sort(time_grid)))
+
+  rownames(d_wide) <- d_wide$patient_id
+
+  as.matrix(d_wide[, -1])
+}
+
+# Load and pull all the files
+list_of_matrices <- lapply(
+  file_names,
+  process_one_file,
+  time_grid = time_grid
+)
+
+# stack into 3D array: patients × time × imputations
+stacked_array <- simplify2array(list_of_matrices)
+
+# pool imputations (Rubin-style mean for descriptive use)
+avg_matrix <- apply(stacked_array, 1:2, mean, na.rm = TRUE)
+
+# Check
+cat(
+  "Final matrix:",
+  nrow(avg_matrix), "patients,",
+  ncol(avg_matrix), "time points\n"
+)
+
+avg_matrix[1, ]
+```
+
+### Binning
+
+In this step we apply time-series binning to simplify individual trajectories.
+
+We first compare different binning sizes, namely 3 and 5. 
+
+```{r feature extraction}
+# Long format from pooled trajectories 
+time_levels <- c(1,3,6,9,12, 16,18,21,24,27, 31,33,36,39,42)
+
+df_long2 <- as.data.frame(avg_matrix) %>%
+  mutate(patient_id = rownames(avg_matrix)) %>%
+  pivot_longer(-patient_id, names_to = "time", values_to = "MMD") %>%
+  mutate(
+    time = as.numeric(sub("t_", "", time)),
+    t_idx = match(time, time_levels)  
+  )
+
+# Create bin assignments
+df_long3 <- df_long2 %>%
+  mutate(bin3 = cut(t_idx, breaks = c(0,5,10,15), labels = c("B1","B2","B3")))
+
+df_long5 <- df_long2 %>%
+  mutate(bin5 = cut(t_idx, breaks = c(0,3,6,9,12,15), labels = paste0("B",1:5)))
+
+# Feature extraction per bin
+bin_features <- function(df, bin_col){
+  df %>%
+    group_by(patient_id, bin = .data[[bin_col]]) %>%
+    summarise(
+      n = sum(!is.na(MMD)),
+      mean_MMD  = mean(MMD, na.rm = TRUE),
+      vol_MMD   = sd(MMD, na.rm = TRUE),
+      slope_MMD = ifelse(n >= 2, coef(lm(MMD ~ t_idx))[2], NA_real_),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      id_cols = patient_id,
+      names_from = bin,
+      values_from = c(mean_MMD, vol_MMD, slope_MMD),
+      names_glue = "{.value}_{bin}"
+    )
+}
+
+feat3 <- bin_features(df_long3, "bin3")
+feat5 <- bin_features(df_long5, "bin5")
+```
+
+Now we move on to comparing metrics for 3 and 5 bins:
+
+```{r feature coverage}
+feature_coverage <- function(feat_df){
+  feat_df %>%
+    pivot_longer(-patient_id, names_to = "feature", values_to = "value") %>%
+    summarise(coverage = mean(!is.na(value)), .by = feature) %>%
+    arrange(coverage)
+}
+
+cov3 <- feature_coverage(feat3)
+cov5 <- feature_coverage(feat5)
+
+ggplot(cov3, aes(x = reorder(feature, coverage), y = coverage)) +
+  geom_col() +
+  coord_flip() +
+  ylim(0, 1) +
+  labs(title = "3-bin: Feature coverage", x = NULL, y = "Proportion non-missing") +
+  theme_minimal(base_size = 11)
+
+ggplot(cov5, aes(x = reorder(feature, coverage), y = coverage)) +
+  geom_col() +
+  coord_flip() +
+  ylim(0, 1) +
+  labs(title = "5-bin: Feature coverage", x = NULL, y = "Proportion non-missing") +
+  theme_minimal(base_size = 11)
+
+```
+In 3 bins, slope/volatility only become problematic in Bin 3. In 5 bins, they’re 
+already marginal by Bin 3, and clearly weak by B4–B5.
+
+```{r estimability}
+# --- slope estimability ---
+slope_estimability <- function(df_long, bin_col){
+  df_long %>%
+    group_by(patient_id, bin = .data[[bin_col]]) %>%
+    summarise(n_obs = sum(!is.na(MMD)), .groups = "drop") %>%
+    summarise(
+      mean_n_obs = mean(n_obs),
+      frac_bins_ge2 = mean(n_obs >= 2),
+      frac_bins_ge3 = mean(n_obs >= 3)
+    )
+}
+slope_estimability(df_long3, "bin3")
+slope_estimability(df_long5, "bin5")
+```
+This shows that the average number of observations in 5 bins is less than 2, 
+which is not favorable.
+
+3 bins are also easier to interpret for us; hence, we decide to use only 3 bins,
+which are the 3 cycles we have in the study. The only metric 5 bins perform 
+better is the RMSE:
+
+```{r RMSE}
+# --- RMSE ---
+recon_rmse <- function(df_long, bin_col){
+  df_long %>%
+    group_by(patient_id, bin = .data[[bin_col]]) %>%
+    mutate(bin_mean = mean(MMD, na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(patient_id) %>%
+    summarise(rmse = sqrt(mean((MMD - bin_mean)^2, na.rm = TRUE)),
+              .groups = "drop")
+}
+
+rmse3 <- recon_rmse(df_long3, "bin3") %>% mutate(bins = "3 bins")
+rmse5 <- recon_rmse(df_long5, "bin5") %>% mutate(bins = "5 bins")
+rmse_all <- bind_rows(rmse3, rmse5)
+
+ggplot(rmse_all, aes(bins, rmse, fill = bins)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.3) +
+  labs(title = "Reconstruction error (RMSE): 3 bins vs 5 bins", x = NULL, y = "RMSE") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none")
+
+```
+
+### Statistics per Bins
+
+For each bin, we compute representative statistics such as the mean,
+trend slope, and volatility. 
+
+
+```{r Statistics}
+bin3_stats <- df_long3 %>%
+  group_by(patient_id, bin3) %>%
+  summarise(
+    n_obs = sum(!is.na(MMD)),
+
+    # Mean level
+    mean_MMD = mean(MMD, na.rm = TRUE),
+
+    # Volatility (within-bin variability)
+    vol_MMD = sd(MMD, na.rm = TRUE),
+
+    # Trend (slope over time index)
+    slope_MMD = ifelse(
+      n_obs >= 2,
+      coef(lm(MMD ~ t_idx))[2],
+      NA_real_
+    ),
+
+    .groups = "drop"
+  )
+
+
+bin3_features <- bin3_stats %>%
+  pivot_wider(
+    id_cols = patient_id,
+    names_from = bin3,
+    values_from = c(mean_MMD, vol_MMD, slope_MMD),
+    names_glue = "{.value}_{bin3}"
+  )
+```
+
+```{r stats table}
+bin3_bybin_summary <- bin3_stats %>%
+  group_by(bin3) %>%
+  summarise(
+    n_patients_with_data = sum(n_obs > 0),
+
+    mean_of_mean = mean(mean_MMD, na.rm = TRUE),
+    sd_of_mean   = sd(mean_MMD, na.rm = TRUE),
+
+    mean_slope   = mean(slope_MMD, na.rm = TRUE),
+    sd_slope     = sd(slope_MMD, na.rm = TRUE),
+
+    mean_vol     = mean(vol_MMD, na.rm = TRUE),
+    sd_vol       = sd(vol_MMD, na.rm = TRUE),
+
+    .groups = "drop"
+  )
+
+bin3_bybin_summary
+```
+
+```{r stats vis}
+# Mean per bin
+ggplot(bin3_stats, aes(bin3, mean_MMD)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Mean MMD per bin", x = "Bin", y = "Mean MMD")
+
+# Slope per bin
+ggplot(bin3_stats, aes(bin3, slope_MMD)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Slope per bin", x = "Bin", y = "Slope (MMD ~ t_idx)")
+
+# Volatility per bin
+ggplot(bin3_stats, aes(bin3, vol_MMD)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Volatility per bin", x = "Bin", y = "SD(MMD)")
+```
+
+### Clustering
+
+After having chosen the optimal binning size, we apply unsupervised clustering
+techniques to identify distinct disease progression patterns across patients.
+
+To find the right number of clusters, we compare the silhouette coefficients
+of various cluster numbers. 
+
+```{r clustering}
+# Compare clustering quality
+run_kmeans <- function(feat_df, k = 3, seed = 123, nstart = 5) {
+  # safer column selection
+  X_raw <- feat_df %>%
+    dplyr::select(-patient_id)
+
+  # mean-impute BEFORE scaling (neutral)
+  for (j in seq_len(ncol(X_raw))) {
+    mj <- mean(X_raw[[j]], na.rm = TRUE)
+    X_raw[[j]][is.na(X_raw[[j]])] <- mj
+  }
+
+  X <- scale(X_raw)
+
+  set.seed(seed)
+  km <- kmeans(X, centers = k, nstart = nstart)
+
+  # silhouette (only meaningful if k >= 2 and no all-in-one cluster)
+  sil <- cluster::silhouette(km$cluster, dist(X))
+  mean_sil <- mean(sil[, "sil_width"])
+
+  list(km = km, mean_sil = mean_sil, sizes = table(km$cluster))
+}
+
+res3 <- run_kmeans(feat3, k = 3)
+res4 <- run_kmeans(feat3, k = 4)
+res5 <- run_kmeans(feat3, k = 5)
+
+c(clusters_3 = res3$mean_sil, clusters_4 = res4$mean_sil, clusters_5 = res5$mean_sil)
+res3$sizes
+res4$sizes
+res5$sizes
+```
+```{r cluster comparison visual}
+sizes_to_df <- function(res, k_val){
+  tibble::tibble(
+    k = k_val,
+    cluster = names(res$sizes),
+    n = as.integer(res$sizes)
+  )
+}
+
+size_df <- bind_rows(
+  sizes_to_df(res3, 3),
+  sizes_to_df(res4, 4),
+  sizes_to_df(res5, 5)
+) %>%
+  mutate(
+    k = factor(k),
+    cluster = factor(cluster)
+  )
+
+ggplot(size_df, aes(x = cluster, y = n, fill = k)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ k, scales = "free_x") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Cluster Sizes for Different k",
+    x = "Cluster ID",
+    y = "Number of patients",
+    fill = "k"
+  )
+
+```
+
+From these numbers, creating 5 clusters seem to create a very small group of 4
+instances. This is why we discard this option.
+
+Since the Silhouette's scores are comparable and the smallest group in k = 4 setting is 13 elements, we believe that this setting gives the best separation of the phenotype.
+
+To visualize this separation, we plot the PCA:
+
+```{r PCA}
+# PCA uses the same features as clustering
+X_pca <- feat3 %>%
+  dplyr::select(-patient_id)
+
+# mean-impute missing values
+for (j in seq_len(ncol(X_pca))) {
+  mj <- mean(X_pca[[j]], na.rm = TRUE)
+  X_pca[[j]][is.na(X_pca[[j]])] <- mj
+}
+
+X_pca <- scale(X_pca)
+
+pca <- prcomp(X_pca, center = FALSE, scale. = FALSE)
+
+pca_df <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  cluster = factor(res4$km$cluster)
+)
+
+ggplot(pca_df, aes(PC1, PC2, color = cluster, fill = cluster)) +
+  stat_ellipse(
+    geom = "polygon",
+    type = "norm",   # assumes roughly elliptical distribution
+    level = 0.80,    # 80% ellipse (you can try 0.95 too)
+    alpha = 0.08,    # very transparent fill
+    linewidth = 0.8
+  ) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  labs(
+    title = "PCA Projection",
+    x = paste0("PC1 (", round(100 * summary(pca)$importance[2,1], 1), "%)"),
+    y = paste0("PC2 (", round(100 * summary(pca)$importance[2,2], 1), "%)"),
+    color = "Cluster",
+    fill = "Cluster"
+  )
+
+```
+
+PCA was computed on the same feature matrix used for clustering, and cluster labels were taken directly from the k-means solution.
+
+### Trajectory Visualization
+
+After clustering, we move on to visualize the trajectories of each cluster.
+
+```{r trajectories}
+cluster_levels <- as.character(sort(unique(res4$km$cluster)))  # "1","2","3","4"
+
+cluster_labels4 <- feat3 %>%
+  select(patient_id) %>%
+  mutate(cluster = factor(res4$km$cluster, levels = cluster_levels))
+
+df_long_cl4 <- as.data.frame(avg_matrix) %>%
+  mutate(patient_id = rownames(avg_matrix)) %>%
+  pivot_longer(-patient_id, names_to = "time", values_to = "MMD") %>%
+  mutate(time = as.numeric(sub("t_", "", time))) %>%
+  left_join(cluster_labels4, by = "patient_id") %>%
+  filter(!is.na(cluster)) %>%
+  mutate(cluster = factor(cluster, levels = cluster_levels))
+
+cluster_cols <- c("1" = "#E41A1C",  # red
+                  "2" = "#377EB8",  # blue
+                  "3" = "#4DAF4A",  # green
+                  "4" = "#984EA3")  # purple
+
+centroid4 <- df_long_cl4 %>%
+  dplyr::group_by(cluster, time) %>%
+  dplyr::summarise(
+    mean_MMD = mean(MMD, na.rm = TRUE),
+    q25 = quantile(MMD, 0.25, na.rm = TRUE),
+    q75 = quantile(MMD, 0.75, na.rm = TRUE),
+    n = sum(!is.na(MMD)),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(cluster, time)
+
+
+ggplot(centroid4, aes(x = time, y = mean_MMD, color = cluster, fill = cluster)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.4) +
+#  geom_point(size = 2) +
+  scale_x_continuous(breaks = c(1,3,6,9,12,16,18,21,24,27,31,33,36,39,42)) +
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Monthly Cluster Trajectories",
+    x = "Month",
+    y = "Monthly Migraine Days",
+    color = "Cluster",
+    fill = "Cluster"
+  ) +
+  scale_color_manual(values = cluster_cols, drop = FALSE) +
+  scale_fill_manual(values = cluster_cols, drop = FALSE)
+
+```
+```{r simplified trajectories}
+df_long_cl4 <- df_long_cl4 %>%
+  mutate(
+    cycle = case_when(
+      time <= 12 ~ "Cycle 1",
+      time <= 27 ~ "Cycle 2",
+      TRUE       ~ "Cycle 3"
+    )
+  )
+
+centroid4_cycle <- df_long_cl4 %>%
+  group_by(cluster, cycle) %>%
+  summarise(
+    mean_MMD = mean(MMD, na.rm = TRUE),
+    q25 = quantile(MMD, 0.25, na.rm = TRUE),
+    q75 = quantile(MMD, 0.75, na.rm = TRUE),
+    n = sum(!is.na(MMD)),
+    .groups = "drop"
+  )
+
+ggplot(
+  centroid4_cycle,
+  aes(x = cycle, y = mean_MMD, color = cluster, group = cluster, fill = cluster)
+) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.6) +
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Cycle-level cluster trajectories (binned)",
+    x = "Treatment cycle",
+    y = "Mean monthly migraine days",
+    color = "Cluster",
+    fill = "Cluster"
+  ) +
+  scale_color_manual(values = cluster_cols, drop = FALSE) +
+  scale_fill_manual(values = cluster_cols, drop = FALSE)
+
+```
+
+From these trajectories, we can clearly see 4 groups:
+
+- Stable Gradual Responders: These patients respond to the drug, but the improvement is gradual. This trend can be seen in Cluster 1.
+
+- Rapid Responders: These patients showed quick response, even though there were some fluctuations. This response behavior is visible in Cluster 2.
+
+- Non-Responders: These patients showed minimal response to the treatment. Their disease burden remained consistently high despite therapy. This trend can be seen in Cluster 3.
+
+- Fluctuating Responders: These patients demonstrate treatment response, but with pronounced temporal instability and recurrent peaks of similar magnitude across cycles. This is shown by Cluster 4.
+
+
+### Non-Contributing Patients
+
+For further analysis, we visualize the proportion of the patients who stopped contributing to data per cluster.
+
+```{r dropout}
+anti_join(
+  data.frame(patient_id = rownames(avg_matrix)),
+  cluster_labels4,
+  by = "patient_id"
+) %>% head()
+
+
+n_table <- df_long_cl4 %>%
+  group_by(cluster, time) %>%
+  summarise(
+    n_obs = sum(!is.na(MMD)),
+    .groups = "drop"
+  )
+
+ggplot(n_table, aes(time, n_obs, color = cluster)) +
+  geom_line(linewidth = 1.2) +
+  theme_minimal() +
+  labs(
+    title = "Number of Patients Contributing over Time",
+    x = "Month (absolute time)",
+    y = "Number of patients observed",
+    color = "Cluster"
+  ) +
+  scale_color_manual(values = cluster_cols, drop = FALSE) +
+  scale_fill_manual(values = cluster_cols, drop = FALSE)
+```
+We observe that the number of participants in clusters 1 and 4 are relatively stable, 
+which are stable responders and fluctuating burden responders. The biggest fall, on
+the other hand, is seen in Cluster 3 - Non Responders. 
+
+This pattern suggests an association between treatment response phenotype and study retention, with poorer treatment response potentially linked to higher dropout rates.
+
+Patients matching the 'Non-Responder' phenotype in the first cycle are at high risk of dropout. These patients could be stratified early for alternative treatments rather than continuing the current therapy.
